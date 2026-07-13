@@ -1,0 +1,171 @@
+import numpy as np
+import pandas as pd
+
+# Custom Functions
+def apply_proration(value, is_prorated, fraction):
+    return np.where(is_prorated, value * fraction, value)
+
+def get_status(row):
+    if row['Amount'] >= row['max_accept']:
+        return 'Good'
+    elif row['Amount'] < row['min_accept']:
+        return 'Less than min'
+    else:
+        return 'Between min & max'
+# ***************************************
+
+# Load Data
+df = pd.read_csv("running_statement.csv")
+grid = pd.read_csv("grid_2026.csv")
+roster = pd.read_csv("roster.csv")
+
+# Preview
+#print(df.head())
+#df.info()
+#print(df.isna().sum())
+
+# Clean dates
+df['Post Date'] = pd.to_datetime(df['Post Date'], errors='coerce')
+df['Pay Out Date'] = pd.to_datetime(df['Pay Out Date'], errors='coerce')
+df['Effective Date'] = pd.to_datetime(df['Effective Date'], errors='coerce')
+df['Term Date'] = pd.to_datetime(df['Term Date'], errors='coerce')
+
+# Clean numbers
+df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
+grid['street_loa_diff'] = pd.to_numeric(grid['street_loa_diff'], errors='coerce')
+grid['min_admin_fees'] = pd.to_numeric(grid['min_admin_fees'], errors='coerce')
+grid['max_admin_fees'] = pd.to_numeric(grid['max_admin_fees'], errors='coerce')
+
+# Standardize Agent Names
+df.loc[df['Agent'].str.contains("Martin, Michael E", case=False, na=False),'Agent'] = "Martin, Michael"
+df.loc[df['Agent'].str.contains("Wilstonn, Michael", case=False, na=False),'Agent'] = "Wilston, Michael"
+df.loc[df['Agent'].str.contains("Jackson, Corey", case=False, na=False),'Agent'] = "Beloved, Corey"
+df.loc[df['Agent'].str.contains("Olsen, Jonathan", case=False, na=False),'Agent'] = "Olson, Jonathan"
+
+# Drop Supplement rows (Before truncating some names in next section)
+df = df[~df['Carrier'].str.contains("Supp")]
+
+# Standardize Carriers
+df.loc[df['Carrier'].str.contains("Devoted", case=False, na=False),'Carrier'] = "Devoted"
+df.loc[df['Carrier'].str.contains("Cigna", case=False, na=False),'Carrier'] = "Cigna"
+df.loc[df['Carrier'].str.contains("Ibc", case=False, na=False),'Carrier'] = "Ibc"
+df.loc[df['Carrier'].str.contains("Alignment", case=False, na=False),'Carrier'] = "Alignment"
+df.loc[df['Carrier'].str.contains("Optimum", case=False, na=False),'Carrier'] = "Optimum"
+df.loc[df['Carrier'].str.contains("Imperial", case=False, na=False),'Carrier'] = "Imperial"
+
+# Clean names
+df['Agent'] = df['Agent'].str.strip().str.title()
+roster['Agent'] = roster['Agent'].str.strip().str.title()
+df['Policy Holder'] = df['Policy Holder'].str.strip().str.title()
+roster['Contract'] = roster['Contract'].str.strip().str.upper()
+df['Notes'] = df['Notes'].str.strip().str.lower()
+df['Agency'] = df['Agency'].str.strip().str.upper()
+df['Carrier'] = df['Carrier'].str.strip().str.title()
+grid['Carrier'] = grid['Carrier'].str.strip().str.title()
+
+# Feature Engineering (Add New Columns)
+df['has_chargeback'] = df['Amount'] < 0
+df['has_ignored'] = df['Notes'].str.contains("zing|steel|stell", case=False, na=False)
+# Check if rows of each group (Agent + Policy Holder) have the same carrier, eff date & policy #
+df['consistent_carrier'] = df.groupby(['Agent', 'Policy Holder'])['Carrier'].transform('nunique') == 1
+df['consistent_eff_date'] = df.groupby(['Agent', 'Policy Holder'])['Effective Date'].transform('nunique') == 1
+df['consistent_policy'] = df.groupby(['Agent', 'Policy Holder'])['Carrier Policy ID'].transform('nunique') == 1
+
+# Filter needed rows only (1/2)
+df = df[df['Agency'].str.contains("LHG|URH", case=False, na=False)]
+df = df[df['Effective Date'].dt.year == 2026]
+df = df[df['Effective Date'].dt.quarter == 1]
+
+# Before merging with -> show carriers/agents that don't match yet
+unmatched_carriers = df[~df['Carrier'].isin(grid['Carrier'])]
+print(" ***Carriers in running statement but not in grid***")
+print(unmatched_carriers['Carrier'].value_counts(), "\n")
+# Export Unmatched carriers
+unmatched_carriers = unmatched_carriers['Carrier'].value_counts().reset_index()
+unmatched_carriers.to_csv("unmatched_carriers.csv", index=False)
+
+unmatched_agents = df[~df['Agent'].isin(roster['Agent'])]
+print("\n","***Agents in running statement but not in roster***")
+print(unmatched_agents['Agent'].value_counts(), "\n")
+
+# Merge with grid & roster
+df = df.merge(grid, on='Carrier', how='inner')
+df = df.merge(roster, on='Agent', how='inner')
+
+# Filter needed rows only (2/2)
+# df = df[df['Carrier'].str.contains("Unitedhealthcare", case=False, na=False)]
+df = df[df['Contract'].str.contains("LOA", case=False, na=False)]
+
+# Group for each Agent + Policy Holder + Carrier
+agg_dict = {col: 'first' for col in df.columns if col not in
+            ['Agent', 'Policy Holder', 'Carrier', 'Amount', 'Effective Date', 'has_chargeback', 'has_ignored']}
+agg_dict['Amount'] = 'sum'
+agg_dict['Effective Date'] = 'min'
+agg_dict['has_chargeback'] = 'any'
+agg_dict['has_ignored'] = 'any'
+df_grp = df.groupby(['Agent', 'Policy Holder', 'Carrier']).agg(agg_dict).reset_index()
+
+# Zero down small values
+df_grp['Amount'] = np.where((df_grp['Amount'] > -1) & (df_grp['Amount'] < 1), 0, df_grp['Amount'])
+
+# Add new columns to df_grp
+df_grp['eff_month'] = df_grp['Effective Date'].dt.month
+df_grp['prorate_fraction'] = (12 - df_grp['eff_month'] + 1) / 12
+df_grp['street_loa_diff_final'] = (
+    apply_proration(df_grp['street_loa_diff'], df_grp['diff_prorated'], df_grp['prorate_fraction']))
+df_grp['min_admin_fees_final'] = (
+    apply_proration(df_grp['min_admin_fees'], df_grp['min_admin_fees_prorated'], df_grp['prorate_fraction']))
+df_grp['max_admin_fees_final'] = (
+    apply_proration(df_grp['max_admin_fees'], df_grp['max_admin_fees_prorated'], df_grp['prorate_fraction']))
+df_grp['min_accept'] = df_grp['street_loa_diff_final'] + df_grp['min_admin_fees_final']
+df_grp['max_accept'] = df_grp['street_loa_diff_final'] + df_grp['max_admin_fees_final']
+df_grp['min_missing'] = df_grp['min_accept'] - df_grp['Amount']
+df_grp['max_missing'] = df_grp['max_accept'] - df_grp['Amount']
+df_grp['status'] = df_grp.apply(get_status, axis=1)
+
+total_policies = len(df_grp)   #used in the final summary
+
+# Filter needed rows only (non zero, status not good)
+df_grp = df_grp[df_grp['Amount']!=0]
+df_grp = df_grp[df_grp['status']!="Good"]
+
+# Zero negative min_missing
+df_grp['min_missing'] = np.where(df_grp['min_missing'] < 0, 0, df_grp['min_missing'])
+
+# Drop Unneeded columns
+df_grp = df_grp.drop(columns=['Pay Type','For','Notes'])
+df_grp = df_grp.drop(columns=['consistent_carrier','consistent_eff_date','consistent_policy'])
+df_grp = df_grp.drop(columns=['diff_prorated','min_admin_fees_prorated','max_admin_fees_prorated'])
+df_grp = df_grp.drop(columns=['has_ignored','eff_month','prorate_fraction', 'street_loa_diff_final', 'min_admin_fees_final', 'max_admin_fees_final'])
+
+# Sort the final output
+df_grp_sorted = df_grp.sort_values(by='Amount')
+
+# Round numeric columns to avoid being formatted as text
+# Excel has a display/precision limit around 15 significant digits. If more than that, Excel sometimes falls back to storing it as text
+numeric_cols = df_grp_sorted.select_dtypes(include='number').columns
+df_grp_sorted[numeric_cols] = df_grp_sorted[numeric_cols].round(2)
+
+# Rename columns
+new_names_dict = {'has_chargeback':'Has Chargeback',
+                  'street_loa_diff':'Comm Diff\n(Before Proration)',
+                  'min_admin_fees':'Min Admin Fees\n(Before Proration)',
+                  'max_admin_fees':'Max Admin Fees\n(Before Proration)',
+                  'min_accept':'Min Acceptable\n(After Proration)',
+                  'max_accept':'Max Acceptable\n(After Proration)',
+                  'min_missing':'Min Missing',
+                  'max_missing':'Max Missing',
+                  'status':'Status'
+                  }
+df_grp_sorted = df_grp_sorted.rename(columns = new_names_dict)
+
+# Export cleaned file
+df_grp_sorted.to_csv("audit_output.csv", index=False)
+
+# Summary Stats
+between_count = len(df_grp[df_grp['status'] == 'Between min & max'])
+less_than_min_count = len(df_grp[df_grp['status'] == 'Less than min'])
+
+print(f"Total tested policies: {total_policies}")
+print(f"Rows with status 'Between min & max': {between_count}")
+print(f"Rows with status 'Less than min': {less_than_min_count}")
