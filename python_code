@@ -79,11 +79,11 @@ df = df[df['Effective Date'].dt.year == 2026]
 
 # Before merging with -> show carriers/agents that don't match yet
 unmatched_carriers = df[~df['Carrier'].isin(grid['Carrier'])]
-#print(" ***Carriers in running statement but not in grid***")
-#print(unmatched_carriers['Carrier'].value_counts(), "\n")
+print(" ***Carriers in running statement but not in grid***")
+print(unmatched_carriers['Carrier'].value_counts(), "\n")
 # Export Unmatched carriers
-unmatched_carriers = unmatched_carriers['Carrier'].value_counts().reset_index()
-unmatched_carriers.to_csv("unmatched_carriers.csv", index=False)
+#unmatched_carriers = unmatched_carriers['Carrier'].value_counts().reset_index()
+#unmatched_carriers.to_csv("unmatched_carriers.csv", index=False)
 
 unmatched_agents = df[~df['Agent'].isin(roster['Agent'])]
 print("\n","***Agents in running statement but not in roster***")
